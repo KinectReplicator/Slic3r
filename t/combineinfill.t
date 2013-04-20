@@ -19,6 +19,7 @@ use Slic3r::Test;
     $config->set('top_solid_layers', 0);
     $config->set('infill_every_layers', 6);
     $config->set('layer_height', 0.06);
+    $config->set('perimeters', 1);
     
     my $test = sub {
         my ($shift) = @_;
@@ -26,26 +27,28 @@ use Slic3r::Test;
         my $self = Slic3r::Test::init_print('20mm_cube', config => $config);
         
         $shift /= &Slic3r::SCALING_FACTOR;
+        my $scale = 4; # make room for fat infill lines with low layer height
 
         # Put a slope on the box's sides by shifting x and y coords by $tilt * (z / boxheight).
         # The test here is to put such a slight slope on the walls that it should
         # not trigger any extra fill on fill layers that should be empty when 
         # combine infill is enabled.
-        $_->[0] += $shift * ($_->[2] / (20 / &Slic3r::SCALING_FACTOR)), for @{$self->objects->[0]->meshes->[0]->vertices};
-        $_->[1] += $shift * ($_->[2] / (20 / &Slic3r::SCALING_FACTOR)), for @{$self->objects->[0]->meshes->[0]->vertices};
-            
+        $_->[0] += $shift * ($_->[2] / (20 / &Slic3r::SCALING_FACTOR)) for @{$self->objects->[0]->meshes->[0]->vertices};
+        $_->[1] += $shift * ($_->[2] / (20 / &Slic3r::SCALING_FACTOR)) for @{$self->objects->[0]->meshes->[0]->vertices};
+        $_ = [$_->[0]*$scale, $_->[1]*$scale, $_->[2]] for @{$self->objects->[0]->meshes->[0]->vertices};
+                
         # copy of Print::export_gcode() up to the point 
         # after fill surfaces are combined
         $self->init_extruders;
-        $_->slice(keep_meshes => 1) for @{$self->objects};
+        $_->slice for @{$self->objects};
         $_->make_perimeters for @{$self->objects};
         foreach my $layer (map @{$_->layers}, @{$self->objects}) {
-            $_->simplify(&Slic3r::SCALED_RESOLUTION)
-                for @{$layer->slices}, (map $_->expolygon, map @{$_->slices}, @{$layer->regions});
+            @$_ = map $_->simplify(&Slic3r::SCALED_RESOLUTION), @$_
+                for $layer->slices, (map $_->slices, @{$layer->regions});
         }
         $_->detect_surfaces_type for @{$self->objects};
         $_->prepare_fill_surfaces for map @{$_->regions}, map @{$_->layers}, @{$self->objects};
-        $_->process_bridges for map @{$_->regions}, map @{$_->layers}, @{$self->objects};
+        $_->process_external_surfaces for map @{$_->regions}, map @{$_->layers}, @{$self->objects};
         $_->discover_horizontal_shells for @{$self->objects};
         $_->combine_infill for @{$self->objects};
 

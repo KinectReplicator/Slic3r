@@ -5,8 +5,8 @@ require Exporter;
 our @ISA = qw(Exporter);
 our @EXPORT_OK = qw(EXTR_ROLE_PERIMETER EXTR_ROLE_EXTERNAL_PERIMETER 
     EXTR_ROLE_CONTOUR_INTERNAL_PERIMETER
-    EXTR_ROLE_FILL EXTR_ROLE_SOLIDFILL EXTR_ROLE_TOPSOLIDFILL EXTR_ROLE_BRIDGE EXTR_ROLE_SKIRT 
-    EXTR_ROLE_SUPPORTMATERIAL EXTR_ROLE_GAPFILL);
+    EXTR_ROLE_FILL EXTR_ROLE_SOLIDFILL EXTR_ROLE_TOPSOLIDFILL EXTR_ROLE_BRIDGE 
+    EXTR_ROLE_INTERNALBRIDGE EXTR_ROLE_SKIRT EXTR_ROLE_SUPPORTMATERIAL EXTR_ROLE_GAPFILL);
 our %EXPORT_TAGS = (roles => \@EXPORT_OK);
 
 use Slic3r::Geometry qw(PI X Y epsilon deg2rad rotate_points);
@@ -15,7 +15,7 @@ use Slic3r::Geometry qw(PI X Y epsilon deg2rad rotate_points);
 has 'polyline' => (
     is          => 'rw',
     required    => 1,
-    handles     => [qw(merge_continuous_lines lines length reverse clip_end simplify)],
+    handles     => [qw(merge_continuous_lines lines length reverse clip_end)],
 );
 
 # height is the vertical thickness of the extrusion expressed in mm
@@ -30,9 +30,10 @@ use constant EXTR_ROLE_FILL                         => 4;
 use constant EXTR_ROLE_SOLIDFILL                    => 5;
 use constant EXTR_ROLE_TOPSOLIDFILL                 => 6;
 use constant EXTR_ROLE_BRIDGE                       => 7;
-use constant EXTR_ROLE_SKIRT                        => 8;
-use constant EXTR_ROLE_SUPPORTMATERIAL              => 9;
-use constant EXTR_ROLE_GAPFILL                      => 10;
+use constant EXTR_ROLE_INTERNALBRIDGE               => 8;
+use constant EXTR_ROLE_SKIRT                        => 9;
+use constant EXTR_ROLE_SUPPORTMATERIAL              => 10;
+use constant EXTR_ROLE_GAPFILL                      => 11;
 
 use constant PACK_FMT => 'ffca*';
 
@@ -81,17 +82,34 @@ sub clip_with_expolygon {
     return @paths;
 }
 
+sub simplify {
+    my $self = shift;
+    $self->polyline($self->polyline->simplify(@_));
+}
+
 sub points {
     my $self = shift;
     return $self->polyline;
 }
 
-sub endpoints {
+sub first_point {
     my $self = shift;
-    return ($self->points->[0], $self->points->[-1]);
+    return $self->polyline->[0];
 }
 
-sub is_printable { 1 }
+sub is_perimeter {
+    my $self = shift;
+    return $self->role == EXTR_ROLE_PERIMETER
+        || $self->role == EXTR_ROLE_EXTERNAL_PERIMETER
+        || $self->role == EXTR_ROLE_CONTOUR_INTERNAL_PERIMETER;
+}
+
+sub is_fill {
+    my $self = shift;
+    return $self->role == EXTR_ROLE_FILL
+        || $self->role == EXTR_ROLE_SOLIDFILL
+        || $self->role == EXTR_ROLE_TOPSOLIDFILL;
+}
 
 sub split_at_acute_angles {
     my $self = shift;

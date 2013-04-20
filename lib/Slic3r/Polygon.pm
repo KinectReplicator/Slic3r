@@ -6,8 +6,21 @@ use warnings;
 use parent 'Slic3r::Polyline';
 
 use Slic3r::Geometry qw(polygon_lines polygon_remove_parallel_continuous_edges
-    polygon_remove_acute_vertices polygon_segment_having_point point_in_polygon);
+    polygon_remove_acute_vertices polygon_segment_having_point point_in_polygon
+    X1 X2 Y1 Y2);
 use Slic3r::Geometry::Clipper qw(JT_MITER);
+
+sub new_from_bounding_box {
+    my $class = shift;
+    my ($bounding_box) = @_;
+    
+    return $class->new([
+        [ $bounding_box->[X1], $bounding_box->[Y1] ],
+        [ $bounding_box->[X2], $bounding_box->[Y1] ],
+        [ $bounding_box->[X2], $bounding_box->[Y2] ],
+        [ $bounding_box->[X1], $bounding_box->[Y2] ],
+    ]);
+}
 
 sub lines {
     my $self = shift;
@@ -82,14 +95,14 @@ sub area {
     return Slic3r::Geometry::Clipper::area($self);
 }
 
-sub safety_offset {
+sub grow {
     my $self = shift;
-    return (ref $self)->new(Slic3r::Geometry::Clipper::safety_offset([$self])->[0]);
+    return $self->split_at_first_point->grow(@_);
 }
 
-sub offset {
+sub simplify {
     my $self = shift;
-    return map Slic3r::Polygon->new($_), Slic3r::Geometry::Clipper::offset([$self], @_);
+    return Slic3r::Geometry::Clipper::simplify_polygon( $self->SUPER::simplify(@_) );
 }
 
 # this method subdivides the polygon segments to that no one of them
@@ -115,10 +128,10 @@ sub subdivide {
     }
 }
 
-# returns false if the polyline is too tight to be printed
+# returns false if the polygon is too tight to be printed
 sub is_printable {
     my $self = shift;
-    my ($flow) = @_;
+    my ($width) = @_;
     
     # try to get an inwards offset
     # for a distance equal to half of the extrusion width;
@@ -129,7 +142,7 @@ sub is_printable {
     # detect them and we would be discarding them.
     my $p = $self->clone;
     $p->make_counter_clockwise;
-    return $p->offset($flow->scaled_width / 2) ? 1 : 0;
+    return Slic3r::Geometry::Clipper::offset([$p], -$width / 2) ? 1 : 0;
 }
 
 sub is_valid {

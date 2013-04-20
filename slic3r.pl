@@ -27,6 +27,8 @@ my %cli_options = ();
         'save=s'                => \$opt{save},
         'load=s@'               => \$opt{load},
         'ignore-nonexistent-config' => \$opt{ignore_nonexistent_config},
+        'no-plater'             => \$opt{no_plater},
+        'gui-mode=s'            => \$opt{gui_mode},
         'datadir=s'             => \$opt{datadir},
         'export-svg'            => \$opt{export_svg},
         'merge|m'               => \$opt{merge},
@@ -73,7 +75,9 @@ my $gui;
 if (!@ARGV && !$opt{save} && eval "require Slic3r::GUI; 1") {
     {
         no warnings 'once';
-        $Slic3r::GUI::datadir = $opt{datadir} if $opt{datadir};
+        $Slic3r::GUI::datadir   = $opt{datadir};
+        $Slic3r::GUI::no_plater = $opt{no_plater};
+        $Slic3r::GUI::mode      = $opt{gui_mode};
     }
     $gui = Slic3r::GUI->new;
     $gui->{skeinpanel}->load_config_file($_) for @{$opt{load}};
@@ -139,6 +143,10 @@ Usage: slic3r.pl [ OPTIONS ] file.stl
                         into the same directory as the input file using the 
                         --output-filename-format to generate the filename)
 $j
+  GUI options:
+    --no-plater         Disable the plater tab
+    --gui-mode          Overrides the configured mode (simple/expert)
+
   Output options:
     --output-filename-format
                         Output file name format; all config options enclosed in brackets
@@ -208,6 +216,9 @@ $j
     --infill-acceleration
                         Overrides firmware's default acceleration for infill. (mm/s^2, set zero
                         to disable; default: $config->{infill_acceleration})
+    --bridge-acceleration
+                        Overrides firmware's default acceleration for bridges. (mm/s^2, set zero
+                        to disable; default: $config->{bridge_acceleration})
     --default-acceleration
                         Acceleration will be reset to this value after the specific settings above
                         have been applied. (mm/s^2, set zero to disable; default: $config->{travel_speed})
@@ -239,6 +250,7 @@ $j
     --extra-perimeters  Add more perimeters when needed (default: yes)
     --randomize-start   Randomize starting point across layers (default: yes)
     --avoid-crossing-perimeters Optimize travel moves so that no perimeters are crossed (default: no)
+    --external-perimeters-first Reverse perimeter order. (default: no)
     --only-retract-when-crossing-perimeters
                         Disable retraction when travelling between infill paths inside the same island.
                         (default: no)
@@ -247,6 +259,7 @@ $j
                         (mm^2, default: $config->{solid_infill_below_area})
     --infill-only-where-needed
                         Only infill under ceilings (default: no)
+    --infill-first      Make infill before perimeters (default: no)
   
    Support material options:
     --support-material  Generate support material for overhangs
@@ -277,6 +290,9 @@ $j
     --retract-before-travel
                         Only retract before travel moves of this length in mm (default: $config->{retract_before_travel}[0])
     --retract-lift      Lift Z by the given distance in mm when retracting (default: $config->{retract_lift}[0])
+    --retract-layer-change
+                        Enforce a retraction before each Z move (default: yes)
+    --wipe              Wipe the nozzle while doing a retraction (default: no)
     
    Retraction options for multi-extruder setups:
     --retract-length-toolchange
@@ -327,6 +343,7 @@ $j
    
    Miscellaneous options:
     --notes             Notes to be added as comments to the output file
+    --resolution        Minimum detail resolution (mm, set zero for full resolution, default: $config->{resolution})
   
    Flow options (advanced):
     --extrusion-width   Set extrusion width manually; it accepts either an absolute value in mm
@@ -337,6 +354,10 @@ $j
                         Set a different extrusion width for perimeters
     --infill-extrusion-width
                         Set a different extrusion width for infill
+    --solid-infill-extrusion-width
+                        Set a different extrusion width for solid infill
+    --top-infill-extrusion-width
+                        Set a different extrusion width for top infill
     --support-material-extrusion-width
                         Set a different extrusion width for support material
     --bridge-flow-ratio Multiplier for extrusion when bridging (> 0, default: $config->{bridge_flow_ratio})

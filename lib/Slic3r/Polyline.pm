@@ -68,8 +68,8 @@ sub simplify {
     my $self = shift;
     my $tolerance = shift || 10;
     
-    @$self = @{ Boost::Geometry::Utils::linestring_simplify($self, $tolerance) };
-    bless $_, 'Slic3r::Point' for @$self;
+    my $simplified = Boost::Geometry::Utils::linestring_simplify($self, $tolerance);
+    return (ref $self)->new($simplified);
 }
 
 sub reverse {
@@ -79,15 +79,16 @@ sub reverse {
 
 sub length {
     my $self = shift;
-    my $length = 0;
-    $length += $_->length for $self->lines;
-    return $length;
+    return Boost::Geometry::Utils::linestring_length($self);
 }
 
-# this only applies to polylines
 sub grow {
     my $self = shift;
-    return Slic3r::Polygon->new(@$self, CORE::reverse @$self[1..($#$self-1)])->offset(@_);
+    return map Slic3r::Polygon->new($_),
+        Slic3r::Geometry::Clipper::offset(
+            [ Slic3r::Polygon->new(@$self, CORE::reverse @$self[1..($#$self-1)]) ],
+            @_,
+        );
 }
 
 sub nearest_point_to {
@@ -165,6 +166,7 @@ sub scale {
     return $self;
 }
 
+# removes the given distance from the end of the polyline
 sub clip_end {
     my $self = shift;
     my ($distance) = @_;
@@ -183,6 +185,30 @@ sub clip_end {
         push @$self, Slic3r::Point->new($new_point);
         $distance = 0;
     }
+}
+
+# only keeps the given distance at the beginning of the polyline
+sub clip_start {
+    my $self = shift;
+    my ($distance) = @_;
+    
+    my $points = [ $self->[0] ];
+    
+    for (my $i = 1; $distance > 0 && $i <= $#$self; $i++) {
+        my $point = $self->[$i];
+        my $segment_length = $point->distance_to($self->[$i-1]);
+        if ($segment_length <= $distance) {
+            $distance -= $segment_length;
+            push @$points, $point;
+            next;
+        }
+        
+        my $new_point = Slic3r::Geometry::point_along_segment($self->[$i-1], $point, $distance);
+        push @$points, Slic3r::Point->new($new_point);
+        $distance = 0;
+    }
+    
+    return (ref $self)->new($points);
 }
 
 package Slic3r::Polyline::Collection;

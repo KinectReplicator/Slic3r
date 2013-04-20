@@ -73,6 +73,7 @@ has 'attributes'    => (is => 'rw', default => sub { {} });
 package Slic3r::Model::Object;
 use Moo;
 
+use List::Util qw(first);
 use Slic3r::Geometry qw(X Y Z);
 
 has 'input_file' => (is => 'rw');
@@ -80,6 +81,7 @@ has 'model'     => (is => 'ro', weak_ref => 1, required => 1);
 has 'vertices'  => (is => 'ro', default => sub { [] });
 has 'volumes'   => (is => 'ro', default => sub { [] });
 has 'instances' => (is => 'rw');
+has 'layer_height_ranges' => (is => 'rw', default => sub { [] }); # [ z_min, z_max, layer_height ]
 
 sub add_volume {
     my $self = shift;
@@ -112,6 +114,8 @@ sub add_instance {
 sub mesh {
     my $self = shift;
     
+    # this mesh won't be suitable for check_manifoldness as multiple
+    # facets from different volumes may use the same vertices
     return Slic3r::TriangleMesh->new(
         vertices => $self->vertices,
         facets   => [ map @{$_->facets}, @{$self->volumes} ],
@@ -134,6 +138,11 @@ sub materials_count {
     
     my %materials = map { $_->material_id // '_default' => 1 } @{$self->volumes};
     return scalar keys %materials;
+}
+
+sub check_manifoldness {
+    my $self = shift;
+    return (first { !$_->mesh->check_manifoldness } @{$self->volumes}) ? 0 : 1;
 }
 
 package Slic3r::Model::Volume;

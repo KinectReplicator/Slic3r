@@ -5,8 +5,9 @@ use warnings;
 # an ExPolygon is a polygon with holes
 
 use Boost::Geometry::Utils;
+use List::Util qw(first);
 use Math::Geometry::Voronoi;
-use Slic3r::Geometry qw(X Y A B point_in_polygon same_line line_length epsilon);
+use Slic3r::Geometry qw(X Y A B point_in_polygon same_line epsilon);
 use Slic3r::Geometry::Clipper qw(union_ex JT_MITER);
 
 # the constructor accepts an array of polygons 
@@ -54,6 +55,24 @@ sub clipper_expolygon {
     };
 }
 
+sub is_valid {
+    my $self = shift;
+    return (!first { !$_->is_valid } @$self)
+        && $self->contour->is_counter_clockwise
+        && (!first { $_->is_counter_clockwise } $self->holes);
+}
+
+# returns false if the expolygon is too tight to be printed
+sub is_printable {
+    my $self = shift;
+    my ($width) = @_;
+    
+    # try to get an inwards offset
+    # for a distance equal to half of the extrusion width;
+    # if no offset is possible, then expolygon is not printable.
+    return Slic3r::Geometry::Clipper::offset($self, -$width / 2) ? 1 : 0;
+}
+
 sub boost_polygon {
     my $self = shift;
     return Boost::Geometry::Utils::polygon(@$self);
@@ -77,15 +96,7 @@ sub offset_ex {
 
 sub safety_offset {
     my $self = shift;
-    
-    # we're offsetting contour and holes separately
-    # because Clipper doesn't return polygons in the same order as 
-    # we feed them to it
-    
-    return (ref $self)->new(
-        $self->contour->safety_offset,
-        @{ Slic3r::Geometry::Clipper::safety_offset([$self->holes]) },
-    );
+    return Slic3r::Geometry::Clipper::safety_offset_ex($self, @_);
 }
 
 sub noncollapsing_offset_ex {
@@ -120,7 +131,7 @@ sub encloses_line {
         # optimization
         return @$clip == 1 && same_line($clip->[0], $line);
     } else {
-        return @$clip == 1 && abs(line_length($clip->[0]) - $line->length) < $tolerance;
+        return @$clip == 1 && abs(Boost::Geometry::Utils::linestring_length($clip->[0]) - $line->length) < $tolerance;
     }
 }
 
@@ -150,11 +161,6 @@ sub bounding_box_polygon {
     ]);
 }
 
-sub bounding_box_center {
-    my $self = shift;
-    return Slic3r::Geometry::bounding_box_center($self->contour);
-}
-
 sub clip_line {
     my $self = shift;
     my ($line) = @_;  # line must be a Slic3r::Line object
@@ -164,8 +170,13 @@ sub clip_line {
 
 sub simplify {
     my $self = shift;
-    $_->simplify(@_) for @$self;
-    $self;
+    my ($tolerance) = @_;
+    
+    # it would be nice to have a multilinestring_simplify method in B::G::U
+    my @simplified = Slic3r::Geometry::Clipper::simplify_polygons(
+        [ map Boost::Geometry::Utils::linestring_simplify($_, $tolerance), @$self ],
+    );
+    return @{ Slic3r::Geometry::Clipper::union_ex([ @simplified ]) };
 }
 
 sub scale {

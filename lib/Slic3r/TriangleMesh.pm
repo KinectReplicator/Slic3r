@@ -163,10 +163,10 @@ sub check_manifoldness {
 sub unpack_line {
     my ($packed) = @_;
     
-    my @data = unpack I_FMT, $packed;
-    splice @data, 0, 2, [ @data[0,1] ];
-    $data[$_] = undef for grep $data[$_] == -1, I_A_ID, I_B_ID, I_FACET_EDGE, I_PREV_FACET_INDEX, I_NEXT_FACET_INDEX;
-    return [@data];
+    my $data = [ unpack I_FMT, $packed ];
+    splice @$data, 0, 2, [ @$data[0,1] ];
+    $data->[$_] = undef for grep $data->[$_] == -1, I_A_ID, I_B_ID, I_FACET_EDGE, I_PREV_FACET_INDEX, I_NEXT_FACET_INDEX;
+    return $data;
 }
 
 sub make_loops {
@@ -585,8 +585,8 @@ sub horizontal_projection {
         push @f, Slic3r::Polygon->new([ map [ @{$self->vertices->[$_]}[X,Y] ], @$facet ]);
     }
     
-    $_->make_counter_clockwise for @f;
     my $scale_vector = Math::Clipper::integerize_coordinate_sets({ bits => 32 }, @f);
+    $_->make_counter_clockwise for @f;  # do this after scaling, as winding order might change while doing that
     my $union = union_ex([ Slic3r::Geometry::Clipper::offset(\@f, 10000) ]);
     Math::Clipper::unscale_coordinate_sets($scale_vector, $_) for @$union;
     return $union;

@@ -13,7 +13,7 @@ has '_crossing_edges' => (is => 'rw', default => sub { {} });  # edge_idx => boo
 
 use List::Util qw(first);
 use Slic3r::Geometry qw(A B scale epsilon nearest_point);
-use Slic3r::Geometry::Clipper qw(diff_ex JT_MITER);
+use Slic3r::Geometry::Clipper qw(diff_ex offset JT_MITER);
 
 # clearance (in mm) from the perimeters
 has '_inner_margin' => (is => 'ro', default => sub { scale 0.5 });
@@ -56,21 +56,20 @@ sub BUILD {
         }
     };
     
+    # simplify islands
+    @{$self->islands} = map $_->simplify($self->_inner_margin), @{$self->islands};
+    
     # process individual islands
-    for my $i (0 .. $#{$self->islands}) {
-        # simplify the island's contours
-        $self->islands->[$i]->simplify($self->_inner_margin);
-        
+    for my $i (0 .. $#{$self->islands}) {        
         # offset the island inwards to make the boundaries for internal movements
         # so that no motion along external perimeters happens
-        $self->_inner->[$i] = [ $self->islands->[$i]->offset_ex(-$self->_inner_margin) ]
-            if !$self->no_internal;
+        $self->_inner->[$i] = $self->no_internal
+            ? []
+            : [ $self->islands->[$i]->offset_ex(-$self->_inner_margin) ];
         
         # offset the island outwards to make the boundaries for external movements
-        $self->_outer->[$i] = [ $self->islands->[$i]->contour->offset($self->_outer_margin) ];
-        
-        # further simplification (isn't this a duplication of the one above?)
-        $_->simplify($self->_inner_margin) for @{$self->_inner->[$i]}, @{$self->_outer->[$i]};
+        $self->_outer->[$i] = [ offset([ $self->islands->[$i]->contour], $self->_outer_margin) ];
+        bless $_, 'Slic3r::Polygon' for @{ $self->_outer->[$i] };
         
         # if internal motion is enabled, build a set of utility expolygons representing
         # the outer boundaries (as contours) and the inner boundaries (as holes). whenever
@@ -170,11 +169,17 @@ sub BUILD {
             lines           => \@lines,
             points          => [ values %{$self->_pointmap} ],
             no_arrows       => 1,
-            polygons        => [ map @$_, @{$self->islands} ],
+            expolygons      => $self->islands,
             #red_polygons    => [ map $_->holes, map @$_, @{$self->_inner} ],
             #white_polygons    => [ map @$_, @{$self->_outer} ],
         );
         printf "%d islands\n", scalar @{$self->islands};
+        
+        eval "use Devel::Size";
+        print  "MEMORY USAGE:\n";
+        printf "  %-19s = %.1fMb\n", $_, Devel::Size::total_size($self->$_)/1024/1024
+            for qw(_inner _outer _contours_ex _pointmap _edges _crossing_edges islands last_crossings);
+        printf "  %-19s = %.1fMb\n", 'self', Devel::Size::total_size($self)/1024/1024;
     }
 }
 

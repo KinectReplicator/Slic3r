@@ -5,9 +5,9 @@ use utf8;
 
 use File::Basename qw(basename dirname);
 use List::Util qw(max sum first);
+use Math::Clipper qw(offset JT_ROUND);
 use Math::ConvexHull::MonotoneChain qw(convex_hull);
 use Slic3r::Geometry qw(X Y Z X1 Y1 X2 Y2 MIN MAX);
-use Slic3r::Geometry::Clipper qw(JT_ROUND);
 use threads::shared qw(shared_clone);
 use Wx qw(:bitmap :brush :button :cursor :dialog :filedialog :font :keycode :icon :id :listctrl :misc :panel :pen :sizer :toolbar :window);
 use Wx::Event qw(EVT_BUTTON EVT_COMMAND EVT_KEY_DOWN EVT_LIST_ITEM_ACTIVATED EVT_LIST_ITEM_DESELECTED EVT_LIST_ITEM_SELECTED EVT_MOUSE_EVENTS EVT_PAINT EVT_TOOL EVT_CHOICE);
@@ -210,32 +210,34 @@ sub new {
         $hsizer->Add($self->{canvas}, 0, wxALL, 10);
         $hsizer->Add($vertical_sizer, 1, wxEXPAND | wxALL, 10);
         
-        my $presets = Wx::BoxSizer->new(wxHORIZONTAL);
-        $presets->AddStretchSpacer(1);
-        my %group_labels = (
-            print       => 'Print settings',
-            filament    => 'Filament',
-            printer     => 'Printer',
-        );
-        $self->{preset_choosers} = {};
-        $self->{preset_choosers_sizers} = {};
-        for my $group (qw(print filament printer)) {
-            my $text = Wx::StaticText->new($self, -1, "$group_labels{$group}:", wxDefaultPosition, wxDefaultSize, wxALIGN_RIGHT);
-            my $choice = Wx::Choice->new($self, -1, wxDefaultPosition, [150, -1], []);
-            $self->{preset_choosers}{$group} = [$choice];
-            EVT_CHOICE($choice, $choice, sub { $self->on_select_preset($group, @_) });
-            
-            $self->{preset_choosers_sizers}{$group} = Wx::BoxSizer->new(wxVERTICAL);
-            $self->{preset_choosers_sizers}{$group}->Add($choice, 0, wxEXPAND | wxBOTTOM, FILAMENT_CHOOSERS_SPACING);
-            
-            $presets->Add($text, 0, wxALIGN_RIGHT | wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-            $presets->Add($self->{preset_choosers_sizers}{$group}, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 15);
-        }
-        $presets->AddStretchSpacer(1);
-        
         my $sizer = Wx::BoxSizer->new(wxVERTICAL);
         $sizer->Add($hsizer, 1, wxEXPAND | wxBOTTOM, 10);
-        $sizer->Add($presets, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
+        
+        if ($self->skeinpanel->{mode} eq 'expert') {
+            my $presets = Wx::BoxSizer->new(wxHORIZONTAL);
+            $presets->AddStretchSpacer(1);
+            my %group_labels = (
+                print       => 'Print settings',
+                filament    => 'Filament',
+                printer     => 'Printer',
+            );
+            $self->{preset_choosers} = {};
+            $self->{preset_choosers_sizers} = {};
+            for my $group (qw(print filament printer)) {
+                my $text = Wx::StaticText->new($self, -1, "$group_labels{$group}:", wxDefaultPosition, wxDefaultSize, wxALIGN_RIGHT);
+                my $choice = Wx::Choice->new($self, -1, wxDefaultPosition, [150, -1], []);
+                $self->{preset_choosers}{$group} = [$choice];
+                EVT_CHOICE($choice, $choice, sub { $self->on_select_preset($group, @_) });
+                
+                $self->{preset_choosers_sizers}{$group} = Wx::BoxSizer->new(wxVERTICAL);
+                $self->{preset_choosers_sizers}{$group}->Add($choice, 0, wxEXPAND | wxBOTTOM, FILAMENT_CHOOSERS_SPACING);
+                
+                $presets->Add($text, 0, wxALIGN_RIGHT | wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+                $presets->Add($self->{preset_choosers_sizers}{$group}, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 15);
+            }
+            $presets->AddStretchSpacer(1);
+            $sizer->Add($presets, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
+        }
         
         $sizer->SetSizeHints($self);
         $self->SetSizer($sizer);
@@ -435,7 +437,7 @@ sub changescale {
     my ($obj_idx, $object) = $self->selected_object;
     
     # max scale factor should be above 2540 to allow importing files exported in inches
-    my $scale = Wx::GetNumberFromUser("", "Enter the scale % for the selected object:", "Scale", $object->scale*100, 0, 5000, $self);
+    my $scale = Wx::GetNumberFromUser("", "Enter the scale % for the selected object:", "Scale", $object->scale*100, 0, 100000, $self);
     return if !$scale || $scale == -1;
     
     $self->{list}->SetItem($obj_idx, 2, "$scale%");
@@ -581,11 +583,15 @@ sub export_gcode {
 sub _init_print {
     my $self = shift;
     
+    my %extra_variables = ();
+    if ($self->skeinpanel->{mode} eq 'expert') {
+        $extra_variables{"${_}_preset"} = $self->skeinpanel->{options_tabs}{$_}->current_preset->{name}
+            for qw(print filament printer);
+    }
+    
     return Slic3r::Print->new(
         config => $self->skeinpanel->config,
-        extra_variables => {
-            map { +"${_}_preset" => $self->skeinpanel->{options_tabs}{$_}->current_preset->{name} } qw(print filament printer),
-        },
+        extra_variables => { %extra_variables },
     );
 }
 
@@ -702,6 +708,7 @@ sub make_model {
         my $new_model_object = $model->add_object(
             vertices    => $model_object->vertices,
             input_file  => $plater_object->input_file,
+            layer_height_ranges => $plater_object->layer_height_ranges,
         );
         foreach my $volume (@{$model_object->volumes}) {
             $new_model_object->add_volume(
@@ -854,7 +861,7 @@ sub repaint {
     @{$parent->{object_previews}} = ();
     for my $obj_idx (0 .. $#{$parent->{objects}}) {
         my $object = $parent->{objects}[$obj_idx];
-        next unless $object->thumbnail;
+        next unless $object->thumbnail && @{$object->thumbnail->expolygons};
         for my $instance_idx (0 .. $#{$object->instances}) {
             my $instance = $object->instances->[$instance_idx];
             push @{$parent->{object_previews}}, [ $obj_idx, $instance_idx, $object->thumbnail->clone ];
@@ -874,7 +881,7 @@ sub repaint {
             # if sequential printing is enabled and we have more than one object
             if ($parent->{config}->complete_objects && (map @{$_->instances}, @{$parent->{objects}}) > 1) {
             	my $convex_hull = Slic3r::Polygon->new(convex_hull([ map @{$_->contour}, @{$parent->{object_previews}->[-1][2]->expolygons} ]));
-                my $clearance = +($convex_hull->offset($parent->{config}->extruder_clearance_radius / 2 * $parent->{scaling_factor}, 1, JT_ROUND))[0];
+                my ($clearance) = offset([$convex_hull], $parent->{config}->extruder_clearance_radius / 2 * $parent->{scaling_factor}, 1, JT_ROUND);
                 $dc->SetPen($parent->{clearance_pen});
                 $dc->SetBrush($parent->{transparent_brush});
                 $dc->DrawPolygon($parent->_y($clearance), 0, 0);
@@ -885,7 +892,7 @@ sub repaint {
     # draw skirt
     if (@{$parent->{object_previews}} && $parent->{config}->skirts) {
         my $convex_hull = Slic3r::Polygon->new(convex_hull([ map @{$_->contour}, map @{$_->[2]->expolygons}, @{$parent->{object_previews}} ]));
-        $convex_hull = +($convex_hull->offset($parent->{config}->skirt_distance * $parent->{scaling_factor}, 1, JT_ROUND))[0];
+        ($convex_hull) = offset([$convex_hull], $parent->{config}->skirt_distance * $parent->{scaling_factor}, 1, JT_ROUND);
         $dc->SetPen($parent->{skirt_pen});
         $dc->SetBrush($parent->{transparent_brush});
         $dc->DrawPolygon($parent->_y($convex_hull), 0, 0) if $convex_hull;
@@ -969,7 +976,7 @@ sub list_item_activated {
     my ($self, $event, $obj_idx) = @_;
     
     $obj_idx //= $event->GetIndex;
-	my $dlg = Slic3r::GUI::Plater::ObjectInfoDialog->new($self,
+	my $dlg = Slic3r::GUI::Plater::ObjectDialog->new($self,
 		object => $self->{objects}[$obj_idx],
 	);
 	$dlg->ShowModal;
@@ -1045,8 +1052,8 @@ sub OnDropFiles {
     # https://rt.perl.org/rt3/Public/Bug/Display.html?id=70602
     @_ = ();
     
-    # only accept STL and AMF files
-    return 0 if grep !/\.(?:stl|amf(?:\.xml)?)$/i, @$filenames;
+    # only accept STL, OBJ and AMF files
+    return 0 if grep !/\.(?:stl|obj|amf(?:\.xml)?)$/i, @$filenames;
     
     $self->{window}->load_file($_) for @$filenames;
 }
@@ -1067,6 +1074,7 @@ has 'rotate'                => (is => 'rw', default => sub { 0 });
 has 'instances'             => (is => 'rw', default => sub { [] }); # upward Y axis
 has 'thumbnail'             => (is => 'rw');
 has 'thumbnail_scaling_factor' => (is => 'rw');
+has 'layer_height_ranges'   => (is => 'rw', default => sub { [] }); # [ z_min, z_max, layer_height ]
 
 # statistics
 has 'facets'                => (is => 'rw');
@@ -1088,7 +1096,7 @@ sub _trigger_model_object {
 sub check_manifoldness {
 	my $self = shift;
 	
-	$self->is_manifold($self->get_model_object->mesh->check_manifoldness);
+	$self->is_manifold($self->get_model_object->check_manifoldness);
 	return $self->is_manifold;
 }
 
@@ -1103,9 +1111,12 @@ sub free_model_object {
 sub get_model_object {
     my $self = shift;
     
-    return $self->model_object if $self->model_object;
-    my $model = Slic3r::Model->read_from_file($self->input_file);
-    return $model->objects->[$self->input_file_object_id];
+    my $object = $self->model_object;
+    if (!$object) {
+        my $model = Slic3r::Model->read_from_file($self->input_file);
+        $object = $model->objects->[$self->input_file_object_id];
+    }
+    return $object;
 }
 
 sub instances_count {
@@ -1126,9 +1137,9 @@ sub make_thumbnail {
     for (map @$_, map @$_, @{$thumbnail->expolygons}) {
         @$_ = map $_ * $self->thumbnail_scaling_factor, @$_;
     }
+    # only simplify expolygons larger than the threshold
+    @{$thumbnail->expolygons} = map { ($_->area >= 1) ? $_->simplify(0.5) : $_ } @{$thumbnail->expolygons};
     foreach my $expolygon (@{$thumbnail->expolygons}) {
-    	@$expolygon = grep $_->area >= 1, @$expolygon;
-	    $expolygon->simplify(0.5);
     	$expolygon->rotate(Slic3r::Geometry::deg2rad($self->rotate));
     	$expolygon->scale($self->scale);
     }
@@ -1165,61 +1176,6 @@ sub set_scale {
 		$self->thumbnail->align_to_origin;
     }
     $self->scale($scale);
-}
-
-package Slic3r::GUI::Plater::ObjectInfoDialog;
-use Wx qw(:dialog :id :misc :sizer :systemsettings);
-use Wx::Event qw(EVT_BUTTON EVT_TEXT_ENTER);
-use base 'Wx::Dialog';
-
-sub new {
-    my $class = shift;
-    my ($parent, %params) = @_;
-    my $self = $class->SUPER::new($parent, -1, "Object Info", wxDefaultPosition, wxDefaultSize);
-    $self->{object} = $params{object};
-
-    my $properties_box = Wx::StaticBox->new($self, -1, "Info", wxDefaultPosition, [400,200]);
-    my $grid_sizer = Wx::FlexGridSizer->new(3, 2, 10, 5);
-    $properties_box->SetSizer($grid_sizer);
-    $grid_sizer->SetFlexibleDirection(wxHORIZONTAL);
-    $grid_sizer->AddGrowableCol(1);
-    
-    my $label_font = Wx::SystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
-    $label_font->SetPointSize(10);
-    
-    my $properties = $self->get_properties;
-    foreach my $property (@$properties) {
-    	my $label = Wx::StaticText->new($properties_box, -1, $property->[0] . ":");
-    	my $value = Wx::StaticText->new($properties_box, -1, $property->[1]);
-    	$label->SetFont($label_font);
-	    $grid_sizer->Add($label, 1, wxALIGN_BOTTOM);
-	    $grid_sizer->Add($value, 0);
-    }
-    
-    my $buttons = $self->CreateStdDialogButtonSizer(wxOK);
-    EVT_BUTTON($self, wxID_OK, sub { $self->EndModal(wxID_OK); });
-    
-    my $sizer = Wx::BoxSizer->new(wxVERTICAL);
-    $sizer->Add($properties_box, 0, wxEXPAND | wxTOP | wxLEFT | wxRIGHT, 10);
-    $sizer->Add($buttons, 0, wxEXPAND | wxBOTTOM | wxLEFT | wxRIGHT, 10);
-    
-    $self->SetSizer($sizer);
-    $sizer->SetSizeHints($self);
-    
-    return $self;
-}
-
-sub get_properties {
-	my $self = shift;
-	
-	return [
-		['Name'			=> $self->{object}->name],
-		['Size'			=> sprintf "%.2f x %.2f x %.2f", @{$self->{object}->size}],
-		['Facets'		=> $self->{object}->facets],
-		['Vertices'		=> $self->{object}->vertices],
-		['Materials' 	=> $self->{object}->materials],
-		['Two-Manifold' => $self->{object}->is_manifold ? 'Yes' : 'No'],
-	];
 }
 
 1;

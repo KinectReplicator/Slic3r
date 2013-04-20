@@ -1,7 +1,7 @@
 package Slic3r::GCode;
 use Moo;
 
-use List::Util qw(max first);
+use List::Util qw(min max first);
 use Slic3r::ExtrusionPath ':roles';
 use Slic3r::Geometry qw(scale unscale scaled_epsilon points_coincide PI X Y B);
 use Slic3r::Geometry::Clipper qw(union_ex);
@@ -28,6 +28,7 @@ has 'last_pos'           => (is => 'rw', default => sub { Slic3r::Point->new(0,0
 has 'last_speed'         => (is => 'rw', default => sub {""});
 has 'last_f'             => (is => 'rw', default => sub {""});
 has 'last_fan_speed'     => (is => 'rw', default => sub {0});
+has 'wipe_path'          => (is => 'rw');
 has 'dec'                => (is => 'ro', default => sub { 3 } );
 
 # used for vibration limit:
@@ -40,7 +41,7 @@ has 'speeds' => (
     default => sub {+{
         map { $_ => 60 * $Slic3r::Config->get_value("${_}_speed") }
             qw(travel perimeter small_perimeter external_perimeter infill
-                solid_infill top_solid_infill support_material bridge gap_fill),
+                solid_infill top_solid_infill support_material bridge gap_fill retract),
     }},
 );
 
@@ -53,6 +54,7 @@ my %role_speeds = (
     &EXTR_ROLE_SOLIDFILL                    => 'solid_infill',
     &EXTR_ROLE_TOPSOLIDFILL                 => 'top_solid_infill',
     &EXTR_ROLE_BRIDGE                       => 'bridge',
+    &EXTR_ROLE_INTERNALBRIDGE               => 'solid_infill',
     &EXTR_ROLE_SKIRT                        => 'perimeter',
     &EXTR_ROLE_SUPPORTMATERIAL              => 'support_material',
     &EXTR_ROLE_GAPFILL                      => 'gap_fill',
@@ -63,10 +65,12 @@ sub set_shift {
     my @shift = @_;
     
     # if shift increases (goes towards right), last_pos decreases because it goes towards left
-    $self->last_pos->translate(
+    my @translate = (
         scale ($self->shift_x - $shift[X]),
         scale ($self->shift_y - $shift[Y]),
     );
+    $self->last_pos->translate(@translate);
+    $self->wipe_path->translate(@translate) if $self->wipe_path;
     
     $self->shift_x($shift[X]);
     $self->shift_y($shift[Y]);
@@ -86,7 +90,7 @@ sub change_layer {
     my $gcode = "";
     if ($Slic3r::Config->gcode_flavor =~ /^(?:makerbot|sailfish)$/) {
         $gcode .= sprintf "M73 P%s%s\n",
-            int(100 * ($layer->id / ($self->layer_count - 1))),
+            int(99 * ($layer->id / ($self->layer_count - 1))),
             ($Slic3r::Config->gcode_comments ? ' ; update progress' : '');
     }
     return $gcode;
@@ -103,7 +107,7 @@ sub move_z {
     my $gcode = "";
     my $current_z = $self->z;
     if (!defined $current_z || $current_z != ($z + $self->lifted)) {
-        $gcode .= $self->retract(move_z => $z);
+        $gcode .= $self->retract(move_z => $z) if $self->extruder->retract_layer_change;
         $self->speed('travel');
         $gcode .= $self->G0(undef, $z, 0, $comment || ('move to next layer (' . $self->layer->id . ')'))
             unless ($current_z // -1) != ($self->z // -1);
@@ -149,6 +153,7 @@ sub extrude_loop {
     
     # extrude along the path
     my $gcode = $self->extrude_path($extrusion_path, $description);
+    $self->wipe_path($extrusion_path->polyline);
     
     # make a little move inwards before leaving loop
     if ($loop->role == EXTR_ROLE_EXTERNAL_PERIMETER) {
@@ -159,12 +164,16 @@ sub extrude_loop {
         $angle *= -1 if $was_clockwise;
         
         # create the destination point along the first segment and rotate it
-        my $point = Slic3r::Geometry::point_along_segment(@{$extrusion_path->polyline}[0,1], scale $extrusion_path->flow_spacing);
+        # we make sure we don't exceed the segment length because we don't know
+        # the rotation of the second segment so we might cross the object boundary
+        my $first_segment = Slic3r::Line->new(@{$extrusion_path->polyline}[0,1]);
+        my $distance = min(scale $extrusion_path->flow_spacing, $first_segment->length);
+        my $point = Slic3r::Geometry::point_along_segment(@$first_segment, $distance);
         bless $point, 'Slic3r::Point';
         $point->rotate($angle, $extrusion_path->polyline->[0]);
         
         # generate the travel move
-        $gcode .= $self->travel_to($point, "move inwards before travel");
+        $gcode .= $self->travel_to($point, $loop->role, "move inwards before travel");
     }
     
     return $gcode;
@@ -186,32 +195,26 @@ sub extrude_path {
         return $gcode;
     }
     
-    my $gcode = "";
-    
-    # skip retract for support material
-    {
-        # retract if distance from previous position is greater or equal to the one specified by the user
-        my $travel = Slic3r::Line->new($self->last_pos->clone, $path->points->[0]->clone);
-        if ($travel->length >= scale $self->extruder->retract_before_travel
-            && ($path->role != EXTR_ROLE_SUPPORTMATERIAL || !$self->layer->support_islands_enclose_line($travel))) {
-            # move travel back to original layer coordinates.
-            # note that we're only considering the current object's islands, while we should
-            # build a more complete configuration space
-            $travel->translate(-$self->shift_x, -$self->shift_y);
-            if (!$Slic3r::Config->only_retract_when_crossing_perimeters || $path->role != EXTR_ROLE_FILL || !first { $_->encloses_line($travel, scaled_epsilon) } @{$self->layer->slices}) {
-                $gcode .= $self->retract(travel_to => $path->points->[0]);
-            }
-        }
-    }
-    
     # go to first point of extrusion path
-    $gcode .= $self->travel_to($path->points->[0], "move to first $description point");
+    my $gcode = "";
+    $gcode .= $self->travel_to($path->points->[0], $path->role, "move to first $description point");
     
     # compensate retraction
     $gcode .= $self->unretract;
     
+    # adjust acceleration
+    my $acceleration;
+    if ($Slic3r::Config->perimeter_acceleration && $path->is_perimeter) {
+        $acceleration = $Slic3r::Config->perimeter_acceleration;
+    } elsif ($Slic3r::Config->infill_acceleration && $path->is_fill) {
+        $acceleration = $Slic3r::Config->infill_acceleration;
+    } elsif ($Slic3r::Config->infill_acceleration && ($path->role == EXTR_ROLE_BRIDGE || $path->role == EXTR_ROLE_INTERNALBRIDGE)) {
+        $acceleration = $Slic3r::Config->bridge_acceleration;
+    }
+    $gcode .= $self->set_acceleration($acceleration) if $acceleration;
+    
     my $area;  # mm^3 of extrudate per mm of tool movement 
-    if ($path->role == EXTR_ROLE_BRIDGE) {
+    if ($path->role == EXTR_ROLE_BRIDGE || $path->role == EXTR_ROLE_INTERNALBRIDGE) {
         my $s = $path->flow_spacing;
         $area = ($s**2) * PI/4;
     } else {
@@ -237,12 +240,15 @@ sub extrude_path {
         $path_length = unscale $path->length;
         $gcode .= $self->G2_G3($path->points->[-1], $path->orientation, 
             $path->center, $e * unscale $path_length, $description);
+        $self->wipe_path(undef);
     } else {
         foreach my $line ($path->lines) {
             my $line_length = unscale $line->length;
             $path_length += $line_length;
             $gcode .= $self->G1($line->[B], undef, $e * $line_length, $description);
         }
+        $self->wipe_path(Slic3r::Polyline->new([ reverse @{$path->points} ]))
+            if $self->extruder->wipe;
     }
     
     if ($Slic3r::Config->cooling) {
@@ -255,22 +261,65 @@ sub extrude_path {
         $self->elapsed_time($self->elapsed_time + $path_time);
     }
     
+    # reset acceleration
+    $gcode .= $self->set_acceleration($Slic3r::Config->default_acceleration)
+        if $acceleration && $Slic3r::Config->default_acceleration;
+    
     return $gcode;
 }
 
 sub travel_to {
     my $self = shift;
-    my ($point, $comment) = @_;
+    my ($point, $role, $comment) = @_;
     
-    return "" if points_coincide($self->last_pos, $point);
-    $self->speed('travel');
     my $gcode = "";
-    if ($Slic3r::Config->avoid_crossing_perimeters && $self->last_pos->distance_to($point) > scale 5 && !$self->straight_once) {
+    
+    my $travel = Slic3r::Line->new($self->last_pos->clone, $point->clone);
+    
+    # move travel back to original layer coordinates for the island check.
+    # note that we're only considering the current object's islands, while we should
+    # build a more complete configuration space
+    $travel->translate(-$self->shift_x, -$self->shift_y);
+    
+    if ($travel->length < scale $self->extruder->retract_before_travel
+        || ($Slic3r::Config->only_retract_when_crossing_perimeters && first { $_->encloses_line($travel, scaled_epsilon) } @{$self->layer->slices})
+        || ($role == EXTR_ROLE_SUPPORTMATERIAL && $self->layer->support_islands_enclose_line($travel))
+        ) {
+        $self->straight_once(0);
+        $self->speed('travel');
+        $gcode .= $self->G0($point, undef, 0, $comment || "");
+    } elsif (!$Slic3r::Config->avoid_crossing_perimeters || $self->straight_once) {
+        $self->straight_once(0);
+        $gcode .= $self->retract(travel_to => $point);
+        $self->speed('travel');
+        $gcode .= $self->G0($point, undef, 0, $comment || "");
+    } else {
         my $plan = sub {
             my $mp = shift;
-            return join '', 
-                map $self->G0($_->[B], undef, 0, $comment || ""),
-                $mp->shortest_path($self->last_pos, $point)->lines;
+            
+            my $gcode = "";
+            my @travel = $mp->shortest_path($self->last_pos, $point)->lines;
+            
+            # if the path is not contained in a single island we need to retract
+            my $need_retract = !$Slic3r::Config->only_retract_when_crossing_perimeters;
+            if (!$need_retract) {
+                $need_retract = 1;
+                foreach my $slice (@{$self->layer->slices}) {
+                    # discard the island if at any line is not enclosed in it
+                    next if first { !$slice->encloses_line($_, scaled_epsilon) } @travel;
+                    # okay, this island encloses the full travel path
+                    $need_retract = 0;
+                    last;
+                }
+            }
+            
+            # do the retract (the travel_to argument is broken)
+            $gcode .= $self->retract(travel_to => $point) if $need_retract;
+            
+            # append the actual path and return
+            $self->speed('travel');
+            $gcode .= join '', map $self->G0($_->[B], undef, 0, $comment || ""), @travel;
+            return $gcode;
         };
         
         if ($self->new_object) {
@@ -288,9 +337,6 @@ sub travel_to {
         } else {
             $gcode .= $plan->($self->layer_mp);
         }
-    } else {
-        $self->straight_once(0);
-        $gcode .= $self->G0($point, undef, 0, $comment || "");
     }
     
     return $gcode;
@@ -308,16 +354,23 @@ sub retract {
     # if we already retracted, reduce the required amount of retraction
     $length -= $self->extruder->retracted;
     return "" unless $length > 0;
+    my $gcode = "";
+    
+    # wipe
+    my $wipe_path;
+    if ($self->extruder->wipe && $self->wipe_path) {
+        $wipe_path = Slic3r::Polyline->new([ $self->last_pos, @{$self->wipe_path}[1..$#{$self->wipe_path}] ])
+            ->clip_start($self->extruder->scaled_wipe_distance);
+    }
     
     # prepare moves
-    $self->speed('retract');
     my $retract = [undef, undef, -$length, $comment];
-    my $lift    = ($self->extruder->retract_lift == 0 || defined $params{move_z})
+    my $lift    = ($self->extruder->retract_lift == 0 || defined $params{move_z}) && !$self->lifted
         ? undef
         : [undef, $self->z + $self->extruder->retract_lift, 0, 'lift plate during travel'];
     
-    my $gcode = "";
     if (($Slic3r::Config->g0 || $Slic3r::Config->gcode_flavor eq 'mach3') && $params{travel_to}) {
+        $self->speed('travel');
         if ($lift) {
             # combine lift and retract
             $lift->[2] = $retract->[2];
@@ -329,16 +382,32 @@ sub retract {
         }
     } elsif (($Slic3r::Config->g0 || $Slic3r::Config->gcode_flavor eq 'mach3') && defined $params{move_z}) {
         # combine Z change and retraction
+        $self->speed('travel');
         my $travel = [undef, $params{move_z}, $retract->[2], "change layer and $comment"];
         $gcode .= $self->G0(@$travel);
     } else {
-        $gcode .= $self->G1(@$retract);
-        if (defined $params{move_z} && $self->extruder->retract_lift > 0) {
-            my $travel = [undef, $params{move_z} + $self->extruder->retract_lift, 0, 'move to next layer (' . $self->layer->id . ') and lift'];
-            $gcode .= $self->G0(@$travel);
-            $self->lifted($self->extruder->retract_lift);
-        } elsif ($lift) {
-            $gcode .= $self->G1(@$lift);
+        # check that we have a positive wipe length
+        if ($wipe_path && (my $total_wipe_length = $wipe_path->length)) {
+            $self->speed('travel');
+            
+            # subdivide the retraction
+            for (1 .. $#$wipe_path) {
+                my $segment_length = $wipe_path->[$_-1]->distance_to($wipe_path->[$_]);
+                $gcode .= $self->G1($wipe_path->[$_], undef, $retract->[2] * ($segment_length / $total_wipe_length), $retract->[3] . ";_WIPE");
+            }
+        } else {
+            $self->speed('retract');
+            $gcode .= $self->G1(@$retract);
+        }
+        if (!$self->lifted) {
+            $self->speed('travel');
+            if (defined $params{move_z} && $self->extruder->retract_lift > 0) {
+                my $travel = [undef, $params{move_z} + $self->extruder->retract_lift, 0, 'move to next layer (' . $self->layer->id . ') and lift'];
+                $gcode .= $self->G0(@$travel);
+                $self->lifted($self->extruder->retract_lift);
+            } elsif ($lift) {
+                $gcode .= $self->G1(@$lift);
+            }
         }
     }
     $self->extruder->retracted($self->extruder->retracted + $length);
